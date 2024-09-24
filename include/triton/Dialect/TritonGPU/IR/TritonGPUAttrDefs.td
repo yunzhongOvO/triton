@@ -281,6 +281,7 @@ compared to 1*64 when the hasLeadingOffset is false.
         // ---- begin GFX908/GFX90A ----
         if (auto mfmaEnc = mlir::dyn_cast<AMDMfmaEncodingAttr>(dotOpEnc.getParent())) {
           int kDimNum = dotOpEnc.getOpIdx() == 0 ? 1 : 0;
+          int nonKDimNum = 1 - kDimNum;
           if (needTrans)
             kDimNum = 1 - kDimNum;
           bool isKDimInner = (order[0] == kDimNum);
@@ -293,15 +294,53 @@ compared to 1*64 when the hasLeadingOffset is false.
             int innerDimLength = shape[order[0]];
             int elemsPerOneBanksRow = (numBanks * bankBitWidth) / typeWidthInBit;
 
+            int mDim = mfmaEnc.getMDim();
+            int nDim = mfmaEnc.getNDim();
+            int nonKDim = dotOpEnc.getOpIdx() == 0 ? mDim : nDim;
+            if ((mDim == 4 && nDim == 64) || (nDim == 4 && mDim == 64)) {
+              // Operands of the layout have following shapes
+              // Large operand:
+              // - shape 64(non-k)x64(k) for 16 bit dtypes
+              // - shape 64(non-k)x16(k) for 32 bit dtypes
+              // Small operand:
+              // - shape 4(non-k)x64(k) for 16 bit dtypes
+              // - shape 4(non-k)x16(k) for 32 bit dtypes
+              int vecSize = bankBitWidth / typeWidthInBit;
+              if (nonKDim == 64 && vecSize < dotOpEnc.getKWidth()) {
+                // This heuristic introduces bank conflicts,
+                // but saves address computation overhead and
+                // reduces number of ds_read/ds_write instructions
+
+                // can not swizzle in vectors of 4 for fp32,
+                // because mfma 4x64 and 64x4 shift loads by 1*(laneId/4)in k dimension, breaking borders of one load
+                vecSize = typeWidthInBit == 32 ? 1 : 4;
+              }
+              const int bankRowInBits = numBanks * bankBitWidth;
+              const int innerDimInBits = innerDimLength * typeWidthInBit;
+              const int perPhase = std::max(1, bankRowInBits / innerDimInBits);
+              const int phaseSanityLimit = std::min(numBanks, innerDimLength / vecSize);
+              const int maxPhase = std::min(phaseSanityLimit, nonKDim) / perPhase;
+              return get(context, vecSize, perPhase, maxPhase, order, CTALayout);
+            }
+
             int perPhase = std::max(1, elemsPerOneBanksRow / innerDimLength);
             // vecSize is set to kWidth of the dotop layout
             int vecSize = dotOpEnc.getKWidth();
             int maxPhase = std::min(SIMDWidth / perPhase, innerDimLength / vecSize);
 
             // TODO (zhanglx): figure out better parameters for mfma4
-            if (mfmaEnc.getMDim() == 4)
+            // if (mfmaEnc.getMDim() == 4)
+            if (nonKDim == 4)
               maxPhase = 4;
-
+            // if maxPhase * perPhase is larger than one block of warps,
+            // fallback to unswizzled tensor.
+            // Shared to dot op conversion requires that swizzling patern
+            // fits into one block of warps.
+            auto warpsPerCTA = mfmaEnc.getWarpsPerCTA();
+            if (maxPhase * perPhase > nonKDim * warpsPerCTA[nonKDimNum]) {
+              assert(isKDimInner);
+              maxPhase = 1;
+            }
             return get(context, vecSize, perPhase, maxPhase, order, CTALayout);
           } else {
             // Do not swizzle in case k dimension is not innermost.

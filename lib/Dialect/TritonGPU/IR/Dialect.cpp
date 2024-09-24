@@ -1331,7 +1331,8 @@ AMDMfmaEncodingAttr::verify(function_ref<mlir::InFlightDiagnostic()> emitError,
   if (versionMinor != 0) {
     return emitError() << "minor version must be 0";
   }
-  if (!((mDim == 32 && nDim == 32) || (mDim == 16 && nDim == 16))) {
+  if (!((mDim == 32 && nDim == 32) || (mDim == 16 && nDim == 16) ||
+        (mDim == 4 && nDim == 64) || (mDim == 64 && nDim == 4))) {
     return emitError()
            << "(M, N) cases other than (32, 32) or (16, 16) unimplemented";
   }
@@ -1562,12 +1563,17 @@ SmallVector<unsigned> AMDMfmaEncodingAttr::getThreadsPerWarp() const {
 
 SmallVector<unsigned> AMDMfmaEncodingAttr::getSizePerThread() const {
   unsigned rows, cols;
+  unsigned mDim = getMDim();
+  unsigned nDim = getNDim();
+  assert((mDim == nDim && (mDim == 32 || mDim == 16 || mDim == 4)) ||
+         (mDim == 64 && nDim == 4) || (mDim == 4 && nDim == 64));
   auto rank = ::getOrder(*this).size();
   SmallVector<unsigned> res(rank, 1);
-  if (getMDim() == 32) {
+  unsigned minDim = std::min(mDim, nDim);
+  if (minDim == 32) {
     rows = 16;
     cols = 1;
-  } else if (getMDim() == 16) {
+  } else if (minDim == 16 || minDim == 4) {
     rows = 4;
     cols = 1;
   } else
@@ -1590,11 +1596,13 @@ AMDMfmaEncodingAttr::getMFMAInstrShapeForOperands(int kWidth, int opIdx) const {
   assert((mDim == nDim) && (mDim == 32 || mDim == 16 || mDim == 4) ||
          (mDim == 64 && nDim == 4) || (mDim == 4 && nDim == 64));
   constexpr int warpSize = 64; // MFMA is always based on the 64-wide warps.
-  int kGroups = -1;
-  if (mDim == nDim)
-    kGroups = warpSize / mDim;
-  if (mDim == 64 && nDim == 4 || mDim == 4 && nDim == 64)
-    kGroups = 1;
+  auto nonKDim = opIdx == 0 ? mDim : nDim;
+  int kGroups = warpSize / nonKDim;
+  // int kGroups = -1;
+  // if (mDim == nDim)
+  //   kGroups = warpSize / mDim;
+  // if (mDim == 64 && nDim == 4 || mDim == 4 && nDim == 64)
+  //   kGroups = 1;
   int64_t kDim = kWidth * kGroups;
   if (opIdx == 0)
     return {mDim, kDim};
@@ -1636,8 +1644,14 @@ unsigned AMDMfmaEncodingAttr::getTotalElemsPerThreadForOperands(
 SmallVector<unsigned>
 AMDMfmaEncodingAttr::getSizePerThreadForOperands(unsigned opIdx) const {
   if (opIdx == 0) {
+    // int repeats = 
+    //   (getMDim() == 64 && getNDim() == 4) ? 16 : 1;
+    // return {1, kWidth * repeats}
     return {4, 1};
   } else if (opIdx == 1) {
+    // int repeats = 
+    //   (getMDim() == 4 && getNDim() == 64) ? 16 : 1;
+    // return {kWidth * repeats, 1};
     return {1, 4};
   } else {
     llvm::report_fatal_error("DotOperandEncodingAttr opIdx must be 0 or 1");
@@ -2102,7 +2116,26 @@ SmallVector<unsigned> DotOperandEncodingAttr::getSizePerThread() const {
   auto parentLayout = getParent();
   assert(parentLayout && "DotOperandEncodingAttr must have a parent");
   if (auto parentMmaLayout = mlir::dyn_cast<MmaEncodingTrait>(parentLayout)) {
-    return parentMmaLayout.getSizePerThreadForOperands(getOpIdx());
+    if (auto mfmaLayout = mlir::dyn_cast<AMDMfmaEncodingAttr>(parentLayout)) {
+    // if (auto mfmaLayout = parentLayout.dyn_cast<AMDMfmaEncodingAttr>()) {
+      auto kWidth = getKWidth();
+      auto opIdx = getOpIdx();
+      if (opIdx == 0) {
+        int repeats = 
+          (mfmaLayout.getMDim() == 64 && mfmaLayout.getNDim() == 4) ? 16 : 1;
+        return {1, kWidth * repeats};
+        // return {4, 1};
+      } else if (opIdx == 1) {
+        int repeats = 
+          (mfmaLayout.getMDim() == 4 && mfmaLayout.getNDim() == 64) ? 16 : 1;
+        return {kWidth * repeats, 1};
+        // return {1, 4};
+      } else {
+        llvm::report_fatal_error("DotOperandEncodingAttr opIdx must be 0 or 1");
+        return {};
+      }
+    } else
+      return parentMmaLayout.getSizePerThreadForOperands(getOpIdx());
   } else {
     llvm::report_fatal_error(
         "DotOperandEncodingAttr non-NvidiaMmaEncodingAttr parent not "
@@ -2303,6 +2336,15 @@ struct TritonGPUInferLayoutInterface
     // Verify that the encodings are valid.
     if (!aEncoding || !bEncoding)
       return op->emitError("mismatching encoding between A and B operands");
+    auto aParentEncoding = 
+        mlir::dyn_cast_or_null<AMDMfmaEncodingAttr>(aEncoding.getParent());
+    auto bParentEncoding =
+        mlir::dyn_cast_or_null<AMDMfmaEncodingAttr>(bEncoding.getParent());
+    if (aParentEncoding != bParentEncoding)
+      return op->emitError("mismatching parent encoding between A and B operands");
+    if (aParentEncoding != nullptr &&
+        aParentEncoding.getMDim() != aParentEncoding.getNDim())
+      return success();
     if (aEncoding.getKWidth() != bEncoding.getKWidth())
       return op->emitError("mismatching kWidth between A and B operands");
     return success();

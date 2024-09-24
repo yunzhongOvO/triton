@@ -322,8 +322,20 @@ public:
     unsigned mDim = 0;
     unsigned nDim = 0;
     if (enforcedNonKDim != 0) {
-      mDim = enforcedNonKDim;
-      nDim = enforcedNonKDim;
+      if (enforcedNonKDim == 32 || enforcedNonKDim == 16 ||
+          enforcedNonKDim == 4) {
+        mDim = enforcedNonKDim;
+        nDim = enforcedNonKDim;
+      } else if (enforcedNonKDim == 464) {
+        mDim = 4;
+        nDim = 64;
+      } else if (enforcedNonKDim == 644) {
+        mDim = 64;
+        nDim = 4;
+      } else {
+        llvm::report_fatal_error("Invalid MFMA nonKDim option, supported "
+                                 "values are: 32, 16, 4, 464, 644");
+      }
     } else {
       int minSize = std::min(M, N);
       if (minSize >= 32) {
@@ -335,6 +347,8 @@ public:
         nDim = 16;
       }
       if (minSize < 16) {
+        assert(opType.getShape()[rank - 1] >= 64 &&
+               "k should be at least 64 to use this layout");
         if (M < 16 && N >= 64) {
           mDim = 4;
           nDim = 64;
@@ -342,8 +356,6 @@ public:
           mDim = 64;
           nDim = 4;
         } else {
-          assert(opType.getShape()[rank - 1] >= 64 &&
-                 "k should be at least 64 to use this layout");
           mDim = 4;
           nDim = 4;
         }
@@ -395,7 +407,7 @@ public:
     auto mDim = mfmaInstr.value().getMDim();
     auto nDim = mfmaInstr.value().getNDim();
     auto kDim = mfmaInstr.value().getKDim();
-    auto kBase = mfmaInstr.value().getKBase();
+    // auto kBase = mfmaInstr.value().getKBase();
 
     auto warpsPerTile =
         warpsPerTileMFMA(dotOp, retShape, numWarps, {mDim, nDim});
@@ -442,24 +454,28 @@ public:
     //        can only consume kBase elements from each thread.
     //    Note that we cannot have larger kPack since kPack = 2 means
     //    ds_read_b128, which is the largest vector size for shared memory load.
-    auto kWidth = kBase;
-    // in mfma 4x4 case argument matrix groups in 16 groups
-    if (mDim == 4 && nDim == 4)
-      kWidth = kDim / 16;
-    if ((mDim == 4 && nDim == 64) || (mDim == 64 && nDim == 4))
-      kWidth = kDim;
+    auto kWidthA = mfmaInstr.value().getKBaseA();
+    auto kWidthB = mfmaInstr.value().getKBaseB();
+    // auto kWidth = kBase;
+    // // in mfma 4x4 case argument matrix groups in 16 groups
+    // if (mDim == 4 && nDim == 4)
+    //   kWidth = kDim / 16;
+    // if ((mDim == 4 && nDim == 64) || (mDim == 64 && nDim == 4))
+    //   kWidth = kDim;
 
     // We want to extend kWidth by kPack (kPack=1 means no extension)
     // to increase ds_read vector size
     // However, in FA, the second dot can only use kWidth = kBase since it's
     // limited by the result of the first dot, which is of mfmaLayout.
-    if (!isSecondDot(dotOp))
-      kWidth *= kPack;
+    if (!isSecondDot(dotOp)) {
+      kWidthA *= kPack;
+      kWidthB *= kPack;
+    }
 
     auto newAEncoding =
-        ttg::DotOperandEncodingAttr::get(ctx, 0, mfmaEnc, kWidth);
+        ttg::DotOperandEncodingAttr::get(ctx, 0, mfmaEnc, kWidthA);
     auto newBEncoding =
-        ttg::DotOperandEncodingAttr::get(ctx, 1, mfmaEnc, kWidth);
+        ttg::DotOperandEncodingAttr::get(ctx, 1, mfmaEnc, kWidthB);
     a = convertAndCastTensor(rewriter, a, newAEncoding,
                              mfmaInstr.value().getElementTypeA());
     b = convertAndCastTensor(rewriter, b, newBEncoding,

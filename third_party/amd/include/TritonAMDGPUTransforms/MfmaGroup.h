@@ -37,7 +37,8 @@ struct MfmaInsnAttr {
   unsigned n;
   unsigned k;
   // kBase refers to the number of elements per thread
-  unsigned kBase;
+  unsigned kBase_a;
+  unsigned kBase_b;
   llvm::StringRef insn;
 };
 
@@ -85,7 +86,8 @@ public:
   unsigned getMDim();
   unsigned getNDim();
   StringRef getInsnName();
-  unsigned getKBase();
+  unsigned getKBaseA();
+  unsigned getKBaseB();
   Type getElementTypeA();
   Type getElementTypeB();
 };

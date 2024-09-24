@@ -95,19 +95,34 @@ llvm::SmallVector<llvm::SmallVector<Value>> computeTensorElemMappingInBlock(
     if (iNonKDim == 32)
       laneHOffset = select(icmp_uge(laneId, _32), i32_val(numOfElems), _0);
     else {
-      // In this configuration warp contains 16 copies of same data
-      if ((iKDim == 1 || iKDim == 4) && iNonKDim == 4) {
+      // shortcut for 64x64 tile size.
+      // In this case warp do not wrap, so no need to introduce this offset
+      if (iNonKDim == 64)
         laneHOffset = i32_val(0);
-      } else {
-        assert(iKDim * iNonKDim / numOfElems == 64 &&
-               "seems no all threads in warp contain unique elements");
+      else
         laneHOffset = mul(udiv(laneId, nonKDim), i32_val(numOfElems));
-      }
+      // if ((iKDim == 1 || iKDim == 4) && iNonKDim == 4) {
+      //   laneHOffset = i32_val(0);
+      // } else {
+      //   assert(iKDim * iNonKDim / numOfElems == 64 &&
+      //          "seems no all threads in warp contain unique elements");
+      //   laneHOffset = mul(udiv(laneId, nonKDim), i32_val(numOfElems));
+      // }
     }
 
     for (int loadId = 0; loadId < loadsPerThread; ++loadId) {
       Value elemVOffset = _0;
-      Value elemHOffset = i32_val(loadId * loadVecSize);
+      // Value elemHOffset = i32_val(loadId * loadVecSize);
+      Value elemHOffset;
+      if (iNonKDim == 64) {
+        Value groupId = udiv(laneId, i32_val(4));
+        Value groupShift = mul(groupId, i32_val(iKDim / 16));
+        Value loadShift = add(groupShift, i32_val(loadId * loadVecSize));
+        Value wrappedLoadShift = urem(loadShift, i32_val(iKDim));
+        elemHOffset = wrappedLoadShift;
+      } else {
+        elemHOffset = i32_val(loadId * loadVecSize);
+      }
 
       Value sliceVOffset =
           add(add(add(tileVOffset, laneVOffset), elemVOffset), warpVOffset);
@@ -153,6 +168,15 @@ fastPathComputeOffsets(ConversionPatternRewriter &rewriter, Location loc,
   Value warpOffset = mul(warpId, i32_val(iNonKDim));
   Value colOffset = urem(laneId, _nonKDim);
 
+  Value halfWarpOffset;
+  if (iNonKDim == 64)
+    halfWarpOffset = i32_val(0);
+  else
+    halfWarpOffset = mul(udiv(laneId, _nonKDim), i32_val(numOfElems * lineSize));
+
+  // sum of offsets dependent from lane id and warp Is across non-k dim
+  Value baseThreadOffset = add(add(halfWarpOffset, colOffset), warpOffset);
+
   for (int block = 0; block < numN; ++block) {
     Value blockOffset = i32_val(block * iNonKDim * warpsPerBlock);
     for (int tile = 0; tile < numK; ++tile) {
@@ -171,13 +195,23 @@ fastPathComputeOffsets(ConversionPatternRewriter &rewriter, Location loc,
         // 32 33 34 35 ... 63
         // 32 33 34 35 ... 63
         Value halfOffset;
-        if ((iKDim == 1 || iKDim == 4) && iNonKDim == 4)
+        if (iNonKDim ==64 || ((iKDim == 1 || iKDim == 4) && iNonKDim == 4))
           halfOffset = i32_val(0);
         else
           halfOffset =
               mul(udiv(laneId, _nonKDim), i32_val(numOfElems * lineSize));
-        Value rowOffset = add(i32_val(elem * lineSize), halfOffset);
-        Value elemOffset = add(rowOffset, colOffset);
+        
+        Value rowOffset;
+        if (iNonKDim == 64) {
+          Value groupId = udiv(laneId, i32_val(4));
+          Value groupShift = mul(groupId, i32_val(iKDim / 16));
+          Value elemShift = add(groupShift, i32_val(elem));
+          Value wrappedElemShift = urem(elemShift, i32_val(iKDim));
+          rowOffset = mul(wrappedElemShift, i32_val(lineSize));
+        } else {
+          rowOffset = i32_val(elem * lineSize);
+        }
+        Value elemOffset = add(add(rowOffset, colOffset), halfOffset);
         Value offset =
             add(add(add(warpOffset, blockOffset), tileOffset), elemOffset);
         offsets[numK * numOfElems * block + numOfElems * tile + elem] = offset;
@@ -257,6 +291,7 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
   int numSubBlocks = 1;
   if ((mfmaInstrK == 4 || mfmaInstrK == 1) && mfmaInstrNonK == 4)
     numSubBlocks = 16;
+  assert(numSubBlocks >= 1 && "after reworking layout, there should be no redundency");
   // numOfElemsPerThreadPerMfmaInstr
   int numOfElems = mfmaInstrNonK * mfmaInstrK * numSubBlocks / iWarpSize;
   assert(numOfElems >= 1);

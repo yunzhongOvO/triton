@@ -17,6 +17,11 @@
 
 // Include TableGen'erated code
 #include "triton/Dialect/TritonGPU/IR/Dialect.cpp.inc"
+// #include "llvm/Support/raw_ostream.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/ErrorHandling.h"
+// #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+#include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -1543,20 +1548,46 @@ SmallVector<unsigned> AMDMfmaEncodingAttr::getThreadsPerWarp() const {
   unsigned rows, cols;
   auto rank = ::getOrder(*this).size();
   SmallVector<unsigned> res(rank, 1);
-  if (getMDim() == 32) {
-    cols = 2;
-    rows = 32;
+  unsigned mDim = getMDim();
+  unsigned nDim = getNDim();
+  if (mDim == nDim) {
+    if (mDim == 32) {
+      cols = 2;
+      rows = 32;
+    } else if (mDim == 16){
+      // assert(getMDim() == 16);
+      cols = 4;
+      rows = 16;
+    } else {
+      assert(mDim == 4);
+      cols = 4;
+      rows = 16;
+    }
+    if (getIsTransposed()) {
+      res[rank - 1] = cols;
+      res[rank - 2] = rows;
+    } else {
+      res[rank - 1] = rows;
+      res[rank - 2] = cols;
+    }
   } else {
-    assert(getMDim() == 16);
-    cols = 4;
-    rows = 16;
-  }
-  if (getIsTransposed()) {
-    res[rank - 1] = cols;
-    res[rank - 2] = rows;
-  } else {
-    res[rank - 1] = rows;
-    res[rank - 2] = cols;
+    if (mDim == 4 && nDim == 64) {
+      if (getIsTransposed()) {
+        res[rank - 1] = 4;
+        res[rank - 2] = 16;
+      } else {
+        res[rank - 1] = 1;
+        res[rank - 2] = 64;
+      }
+    } else if (mDim == 64 && nDim == 4) {
+      if (getIsTransposed()) {
+        res[rank - 1] = 64;
+        res[rank - 2] = 1;
+      } else {
+        res[rank - 1] = 16;
+        res[rank - 2] = 4;
+      }
+    }
   }
   return res;
 }
@@ -1604,6 +1635,8 @@ AMDMfmaEncodingAttr::getMFMAInstrShapeForOperands(int kWidth, int opIdx) const {
   // if (mDim == 64 && nDim == 4 || mDim == 4 && nDim == 64)
   //   kGroups = 1;
   int64_t kDim = kWidth * kGroups;
+  // llvm::dbgs() << "opIdx = " << opIdx << "kWidth" << kWidth << "kGroups = " << kGroups << 
+    // "kDim = " << kDim << "\n";
   if (opIdx == 0)
     return {mDim, kDim};
   else
@@ -1619,6 +1652,13 @@ AMDMfmaEncodingAttr::getMFMARepForOperands(ArrayRef<int64_t> operandShape,
   auto warpsPerCTA = getWarpsPerCTA();
   int numRepBatch =
       rank == 3 ? std::max<int64_t>(1, operandShape[0] / warpsPerCTA[0]) : 1;
+
+  // for (int i = 0; i < rank; ++i){
+  //   llvm::dbgs() << "kWidth = " << kWidth << "\n";
+  //   llvm::dbgs() << "operandShape[" << i << "] = " << operandShape[i] << "\n"; // 64, 64
+  //   llvm::dbgs() << "operandTileShape[" << i << "] = " << operandTileShape[i] << "\n"; // 4, 64
+  //   llvm::dbgs() << "warpsPerCTA[" << i << "] = " << warpsPerCTA[i] << "\n"; // 4, 1
+  // }
   if (opIdx == 0)
     return {
         numRepBatch,

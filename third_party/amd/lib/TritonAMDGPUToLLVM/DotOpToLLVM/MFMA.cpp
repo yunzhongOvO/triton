@@ -180,6 +180,7 @@ struct DotOpMFMAConversionHelper {
       acc = valC;
       for (int kRep = 0; kRep < numRepeats; kRep++) {
         if (mDim == 4) {
+          // llvm::dbgs() << "valA.size() = " << valA.size() << " valB.size() = " << valB.size() << "\n";
           assert(valA.size() == 1 && valB.size() == 16);
           if (!transpose)
             acc = generateMFMAOp(mfmaInsnName, valA[0], valB[kRep], acc);
@@ -334,7 +335,11 @@ struct DotOpMFMAConversionHelper {
         mfmaLayout.getMFMARepForOperands(aTensorTy.getShape(), kWidthA, 0);
     auto repB =
         mfmaLayout.getMFMARepForOperands(bTensorTy.getShape(), kWidthB, 1);
-
+    
+    // for (int i = 0; i < 3; ++i) {
+    //   llvm::dbgs() << "repA: " << repA[i] << "  repB: " << repB[i] << "\n";
+    // }
+    
     assert(repA[2] == repB[1]);
 
     Value loadedA = adaptor.getA();
@@ -489,6 +494,7 @@ struct DotOpMFMAConversionHelper {
     // "Wide operand" means that this operand id for mfma 4x64 layout
     // This operand is 64x64 for fp16, bf16 and int8 data types and
     // 16x64 for fp32
+    // llvm::dbgs() << "kWidth = " << kWidth << "\n";
     bool wideOperand = kWidth >= 16;
     // How many rocdl intrinsics will process one tile
     int numIntrinsics = wideOperand ? 16 : 1;

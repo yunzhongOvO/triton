@@ -103,7 +103,7 @@ auto getMfmaInsnGroupAttrMap = []() -> const MfmaInsnGroupMap & {
       {{4, 64, MfmaTypeId::Fp16TyId, 2},
        {4, 64, 64, 4, 64, ROCDL::mfma_f32_4x4x4f16::getOperationName()}},
       {{4, 64, MfmaTypeId::Fp16TyId, 3},
-       {4, 64, 64, 4, 4, ROCDL::mfma_f32_4x4x4f16::getOperationName()}},
+       {4, 64, 64, 4, 64, ROCDL::mfma_f32_4x4x4f16::getOperationName()}},
       {{64, 4, MfmaTypeId::Fp16TyId, 1},
        {64, 4, 64, 64, 4, ROCDL::mfma_f32_4x4x4f16::getOperationName()}},
       {{64, 4, MfmaTypeId::Fp16TyId, 2},

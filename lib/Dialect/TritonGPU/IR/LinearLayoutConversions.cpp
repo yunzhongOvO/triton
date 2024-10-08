@@ -476,7 +476,9 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
          "Unsupported tensor shape for given mfma layout");
 
   assert(((getMDim() == 32 && getNDim() == 32) ||
-          (getMDim() == 16 && getNDim() == 16)) &&
+          (getMDim() == 16 && getNDim() == 16)) ||
+          (getMDim() == 4 && getNDim() == 64) ||
+          (getMDim() == 64 && getNDim() == 4) &&
          "Unsupported mfma type");
 
   MLIRContext *ctx = getContext();
@@ -506,9 +508,9 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
     tileLayout = LinearLayout(
         {{kRegister, {{0, 1}, {0, 2}, {0, 8}, /*gap*/ {0, 16}}},
          {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, {16, 0}, /*gap*/ {0, 4}}}},
-        {outDimNames[order[0]], outDimNames[order[1]]});
-  } else {
-    assert(getMDim() == 16);
+        {outDimNames[order[0]], outDimNames[order[1]]}); // N, M
+  } else if (getMDim() == 16) {
+    // assert(getMDim() == 16);
     // For mfma with 16x16 output, each of the 64 threads holds 4 elements.
     //
     // For the register (i.e., element) dimension, these 4 elements are along
@@ -520,6 +522,33 @@ AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
     tileLayout = LinearLayout(
         {{kRegister, {{0, 1}, {0, 2}}},
          {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, /*gap*/ {0, 4}, {0, 8}}}},
+        {outDimNames[order[0]], outDimNames[order[1]]});
+  } else if (getMDim() == 4 && getNDim() == 64) {
+    //   L(in1=1, in2=0) = (M=1, N=0)
+    //   L(in1=2, in2=0) = (M=2, N=0)
+    //   L(in1=0, in2=1) = (M=0, N=1)
+    //   L(in1=0, in2=2) = (M=0, N=2)
+    //   L(in1=0, in2=4) = (M=0, N=4)
+    //   L(in1=0, in2=8) = (M=0, N=8)
+    //   L(in1=0, in2=16) = (M=0, N=18)
+    //   L(in1=0, in2=32) = (M=0, N=32)
+    tileLayout = LinearLayout(
+        {{kRegister, {{0, 1}, {0, 2}}},
+         {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, /*gap*/ {16, 0}, {32, 0}}}},
+        {outDimNames[order[0]], outDimNames[order[1]]});
+  } else {
+    assert(getMDim() == 64 && getNDim() == 4);
+    //   L(in1=1, in2=0) = (M=1, N=0)
+    //   L(in1=2, in2=0) = (M=2, N=0)
+    //   L(in1=0, in2=1) = (M=0, N=1)
+    //   L(in1=0, in2=2) = (M=0, N=2)
+    //   L(in1=0, in2=4) = (M=4, N=0)
+    //   L(in1=0, in2=8) = (M=8, N=0)
+    //   L(in1=0, in2=16) = (M=16, N=0)
+    //   L(in1=0, in2=32) = (M=32, N=0)
+    tileLayout = LinearLayout(
+        {{kRegister, {{0, 1}, {0, 2}}},
+         {kLane, {{1, 0}, {2, 0}, {0, 4}, {0, 8}, /*gap*/ {0, 16}, {0, 32}}}},
         {outDimNames[order[0]], outDimNames[order[1]]});
   }
   if (hasBatchDim) {

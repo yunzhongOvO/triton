@@ -1410,6 +1410,8 @@ inline Value packLLElements(Location loc,
   }
 
   auto elementTypes = structType.getBody();
+  llvm::dbgs() << "elementTypes: " << elementTypes.size() << "resultVals: "
+               << resultVals.size() << "\n";
   if (elementTypes.size() != resultVals.size()) {
     emitError(loc) << " size mismatch when packing elements for LLVM struct"
                    << " expected " << elementTypes.size() << " but got "

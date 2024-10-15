@@ -768,23 +768,24 @@ AMDMfmaEncodingAttr::getElemsPerThread(ArrayRef<int64_t> shape,
   assert((rank == 2 || rank == 3) && "Unexpected rank of mfma layout");
 
   SmallVector<unsigned> elemsPerThread(rank);
-  auto nonKDim = getMDim();
-  auto elemsPerThreadPerTile = (nonKDim == 16 ? 4 : 16);
+  auto mDim = getMDim();
+  auto nDim = getNDim();
+  auto elemsPerThreadPerTile = (mDim == 32 ? 16 : 4);
   if (rank == 3)
     elemsPerThread[0] = ceil<unsigned>(shape[0], getWarpsPerCTA()[0]);
   if (getIsTransposed()) {
     unsigned elemsCol =
-        ceil<unsigned>(shape[rank - 1], nonKDim * getWarpsPerCTA()[rank - 1]) *
+        ceil<unsigned>(shape[rank - 1], nDim * getWarpsPerCTA()[rank - 1]) *
         elemsPerThreadPerTile;
     unsigned elemsRow =
-        ceil<unsigned>(shape[rank - 2], nonKDim * getWarpsPerCTA()[rank - 2]);
+        ceil<unsigned>(shape[rank - 2], mDim * getWarpsPerCTA()[rank - 2]);
     elemsPerThread[rank - 2] = elemsRow;
     elemsPerThread[rank - 1] = elemsCol;
   } else {
     unsigned elemsCol =
-        ceil<unsigned>(shape[rank - 1], nonKDim * getWarpsPerCTA()[rank - 1]);
+        ceil<unsigned>(shape[rank - 1], nDim * getWarpsPerCTA()[rank - 1]);
     unsigned elemsRow =
-        ceil<unsigned>(shape[rank - 2], nonKDim * getWarpsPerCTA()[rank - 2]) *
+        ceil<unsigned>(shape[rank - 2], mDim * getWarpsPerCTA()[rank - 2]) *
         elemsPerThreadPerTile;
     elemsPerThread[rank - 2] = elemsRow;
     elemsPerThread[rank - 1] = elemsCol;
@@ -1550,44 +1551,27 @@ SmallVector<unsigned> AMDMfmaEncodingAttr::getThreadsPerWarp() const {
   SmallVector<unsigned> res(rank, 1);
   unsigned mDim = getMDim();
   unsigned nDim = getNDim();
-  if (mDim == nDim) {
-    if (mDim == 32) {
-      cols = 2;
-      rows = 32;
-    } else if (mDim == 16){
-      // assert(getMDim() == 16);
-      cols = 4;
-      rows = 16;
-    } else {
-      assert(mDim == 4);
-      cols = 4;
-      rows = 16;
-    }
-    if (getIsTransposed()) {
-      res[rank - 1] = cols;
-      res[rank - 2] = rows;
-    } else {
-      res[rank - 1] = rows;
-      res[rank - 2] = cols;
-    }
+  if (mDim == 32) {
+    cols = 2;
+    rows = 32;
+  } else if (mDim == 16){
+    cols = 4;
+    rows = 16;
   } else {
-    if (mDim == 4 && nDim == 64) {
-      if (getIsTransposed()) {
-        res[rank - 1] = 4;
-        res[rank - 2] = 16;
-      } else {
-        res[rank - 1] = 1;
-        res[rank - 2] = 64;
-      }
-    } else if (mDim == 64 && nDim == 4) {
-      if (getIsTransposed()) {
-        res[rank - 1] = 64;
-        res[rank - 2] = 1;
-      } else {
-        res[rank - 1] = 16;
-        res[rank - 2] = 4;
-      }
+    if (mDim == 4) {
+      cols = 1;
+      rows = 64;
+    } else {
+      cols = 64;
+      rows = 1;
     }
+  }
+  if (getIsTransposed()) {
+    res[rank - 1] = cols;
+    res[rank - 2] = rows;
+  } else {
+    res[rank - 1] = rows;
+    res[rank - 2] = cols;
   }
   return res;
 }
@@ -1604,7 +1588,7 @@ SmallVector<unsigned> AMDMfmaEncodingAttr::getSizePerThread() const {
   if (minDim == 32) {
     rows = 16;
     cols = 1;
-  } else if (minDim == 16 || minDim == 4) {
+  } else if (minDim == 16 || minDim == 4 || minDim == 64) {
     rows = 4;
     cols = 1;
   } else
@@ -1629,14 +1613,7 @@ AMDMfmaEncodingAttr::getMFMAInstrShapeForOperands(int kWidth, int opIdx) const {
   constexpr int warpSize = 64; // MFMA is always based on the 64-wide warps.
   auto nonKDim = opIdx == 0 ? mDim : nDim;
   int kGroups = warpSize / nonKDim;
-  // int kGroups = -1;
-  // if (mDim == nDim)
-  //   kGroups = warpSize / mDim;
-  // if (mDim == 64 && nDim == 4 || mDim == 4 && nDim == 64)
-  //   kGroups = 1;
   int64_t kDim = kWidth * kGroups;
-  // llvm::dbgs() << "opIdx = " << opIdx << "kWidth" << kWidth << "kGroups = " << kGroups << 
-    // "kDim = " << kDim << "\n";
   if (opIdx == 0)
     return {mDim, kDim};
   else
@@ -1683,16 +1660,17 @@ unsigned AMDMfmaEncodingAttr::getTotalElemsPerThreadForOperands(
 
 SmallVector<unsigned>
 AMDMfmaEncodingAttr::getSizePerThreadForOperands(unsigned opIdx) const {
+  unsigned kWidth = 4;
   if (opIdx == 0) {
-    // int repeats = 
-    //   (getMDim() == 64 && getNDim() == 4) ? 16 : 1;
-    // return {1, kWidth * repeats}
-    return {4, 1};
+    int repeats = 
+      (getMDim() == 64 && getNDim() == 4) ? 16 : 1;
+    return {kWidth * repeats, 1};
+    // return {4, 1};
   } else if (opIdx == 1) {
-    // int repeats = 
-    //   (getMDim() == 4 && getNDim() == 64) ? 16 : 1;
-    // return {kWidth * repeats, 1};
-    return {1, 4};
+    int repeats = 
+      (getMDim() == 4 && getNDim() == 64) ? 16 : 1;
+    return {1, kWidth * repeats};
+    // return {1, 4};
   } else {
     llvm::report_fatal_error("DotOperandEncodingAttr opIdx must be 0 or 1");
     return {};
@@ -1702,7 +1680,7 @@ AMDMfmaEncodingAttr::getSizePerThreadForOperands(unsigned opIdx) const {
 SmallVector<unsigned>
 AMDMfmaEncodingAttr::getShapePerCTATileForDotOperands(ArrayRef<int64_t> shape,
                                                       int opIdx) const {
-  assert(getMDim() == 32 || getMDim() == 16);
+  assert(getMDim() == 32 || getMDim() == 16 || getMDim() == 4);
   auto parentShapePerCTATile = getShapePerCTATile(shape);
   auto rank = parentShapePerCTATile.size();
   if (opIdx == 0) {
@@ -2376,17 +2354,17 @@ struct TritonGPUInferLayoutInterface
     // Verify that the encodings are valid.
     if (!aEncoding || !bEncoding)
       return op->emitError("mismatching encoding between A and B operands");
-    auto aParentEncoding = 
-        mlir::dyn_cast_or_null<AMDMfmaEncodingAttr>(aEncoding.getParent());
-    auto bParentEncoding =
-        mlir::dyn_cast_or_null<AMDMfmaEncodingAttr>(bEncoding.getParent());
-    if (aParentEncoding != bParentEncoding)
-      return op->emitError("mismatching parent encoding between A and B operands");
-    if (aParentEncoding != nullptr &&
-        aParentEncoding.getMDim() != aParentEncoding.getNDim())
-      return success();
-    if (aEncoding.getKWidth() != bEncoding.getKWidth())
-      return op->emitError("mismatching kWidth between A and B operands");
+    // auto aParentEncoding = 
+    //     mlir::dyn_cast_or_null<AMDMfmaEncodingAttr>(aEncoding.getParent());
+    // auto bParentEncoding =
+    //     mlir::dyn_cast_or_null<AMDMfmaEncodingAttr>(bEncoding.getParent());
+    // if (aParentEncoding != bParentEncoding)
+    //   return op->emitError("mismatching parent encoding between A and B operands");
+    // if (aParentEncoding != nullptr &&
+    //     aParentEncoding.getMDim() != aParentEncoding.getNDim())
+    //   return success();
+    // if (aEncoding.getKWidth() != bEncoding.getKWidth())
+    //   return op->emitError("mismatching kWidth between A and B operands");
     return success();
   }
 
